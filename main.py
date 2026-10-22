@@ -7,16 +7,38 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
 import os
+import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 import converter
 from radial_menu import RadialMenu
+
+# Log next to main.py: pythonw / windowed runs otherwise swallow every error.
+LOG = Path(__file__).with_name("radialconvert.log")
+logging.basicConfig(filename=LOG, level=logging.INFO, format="%(asctime)s %(message)s")
+
+
+def _excepthook(exc_type, exc, tb):
+    logging.error("Unhandled error:\n%s", "".join(traceback.format_exception(exc_type, exc, tb)))
+    sys.__excepthook__(exc_type, exc, tb)
+
+
+sys.excepthook = _excepthook
+
+
+def alert(title: str, text: str):
+    """Visible message box (tray notifications are often suppressed by Focus Assist)."""
+    box = QMessageBox(QMessageBox.Warning, title, text)
+    box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    box.exec()
 
 ORANGE = QColor(255, 140, 0)
 
@@ -80,6 +102,9 @@ class DropCircle(QWidget):
             self.update()
             e.acceptProposedAction()
 
+    def dragMoveEvent(self, e):
+        e.acceptProposedAction()
+
     def dragLeaveEvent(self, _):
         self._hot = False
         self.update()
@@ -88,8 +113,12 @@ class DropCircle(QWidget):
         self._hot = False
         self.update()
         urls = e.mimeData().urls()
+        e.acceptProposedAction()
         if urls:
-            self.on_file(urls[0].toLocalFile())
+            path = urls[0].toLocalFile()
+            logging.info("dropped: %r", path)
+            # Defer: don't open windows from inside the OS drag-and-drop loop.
+            QTimer.singleShot(100, lambda: self.on_file(path))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -152,12 +181,18 @@ class RadialConvert:
     def open_menu(self, path: str):
         path = os.path.abspath(path)
         targets = converter.targets_for(path)
+        logging.info("open_menu %r kind=%s targets=%s", path, converter.kind_of(path), targets)
         if not targets:
             kind = converter.kind_of(path)
-            hint = "Unsupported file type." if not kind else "Install ffmpeg / pandoc / LibreOffice for more formats."
-            self.tray.showMessage("Nothing to convert to", f"{Path(path).name}: {hint}", QSystemTrayIcon.Warning)
+            if not kind:
+                hint = f"'.{converter.ext_of(path)}' isn't a supported file type yet."
+            else:
+                need = {"audio": "ffmpeg", "video": "ffmpeg", "text": "pandoc", "office": "LibreOffice",
+                        "sheet": "pandas (pip install pandas openpyxl)", "pdf": "PyMuPDF (pip install pymupdf)", "image": "Pillow (pip install Pillow)"}[kind]
+                hint = f"No converter installed for this file type. Install: {need}."
+            alert("Nothing to convert to", f"{Path(path).name}\n\n{hint}")
             if self.cli:
-                QTimer.singleShot(4000, self.app.quit)
+                self.app.quit()
             return
         self.menu = RadialMenu(Path(path).name, targets)
         self.menu.chosen.connect(lambda fmt: self.start(path, fmt))
@@ -174,10 +209,14 @@ class RadialConvert:
     def finished(self, worker: Worker, ok: bool, msg: str):
         self.workers.discard(worker)
         if ok:
+            logging.info("saved %s", msg)
             self.last_output = msg
             self.tray.showMessage("Done", f"Saved {Path(msg).name} (click to show in folder)", QSystemTrayIcon.Information, 5000)
+            if sys.platform == "win32":  # tray pop-ups are often hidden, so also open Explorer on the result
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(msg)])
         else:
-            self.tray.showMessage("Conversion failed", msg, QSystemTrayIcon.Critical, 8000)
+            logging.error("conversion failed: %s", msg)
+            alert("Conversion failed", msg)
         if self.cli and not self.workers:
             QTimer.singleShot(6000, self.app.quit)
 
@@ -193,6 +232,6 @@ def main():
     _keep = RadialConvert(app, cli_file)  # noqa: F841
     sys.exit(app.exec())
 
-
+#hi
 if __name__ == "__main__":
     main()
