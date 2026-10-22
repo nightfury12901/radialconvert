@@ -1,0 +1,46 @@
+name: Release
+
+# Publish a downloadable installer whenever you push a version tag:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build app and installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          if (-not $version -or $version -eq "main") { $version = "0.0.0-dev" }
+          .\build.ps1 -Version $version
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadialConvert-Setup
+          path: dist/RadialConvert-Setup-*.exe
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RadialConvert-Setup-*.exe
+          generate_release_notes: true

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -26,6 +26,8 @@ class RadialMenu(QWidget):
         self.items = items
         self.hover = -1
         self._done = False
+        self._armed = False  # ignore focus-loss until the menu has had a moment to appear
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
@@ -43,6 +45,7 @@ class RadialMenu(QWidget):
         self.raise_()
         self.activateWindow()
         self.setFocus()
+        QTimer.singleShot(600, lambda: setattr(self, "_armed", True))
 
     def _finish(self, fmt: str | None):
         if self._done:
@@ -135,6 +138,6 @@ class RadialMenu(QWidget):
                 self._finish(self.items[i])
 
     def event(self, e):
-        if e.type() == QEvent.WindowDeactivate:
+        if e.type() == QEvent.WindowDeactivate and self._armed:
             self._finish(None)
         return super().event(e)

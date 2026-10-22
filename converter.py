@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,7 @@ KINDS = {
     "text": {"md", "markdown", "html", "htm", "txt", "rtf", "epub"},
     "office": {"doc", "docx", "odt", "ppt", "pptx", "odp"},
     "sheet": {"xls", "xlsx", "ods", "csv", "tsv", "json"},
+    "pdf": {"pdf"},
 }
 
 TARGETS = {
@@ -34,6 +36,7 @@ TARGETS = {
     "text": ["docx", "pdf", "html", "md", "txt", "epub", "odt"],
     "office": ["pdf", "docx", "odt", "txt", "html", "md"],
     "sheet": ["csv", "xlsx", "json", "tsv", "pdf"],
+    "pdf": ["png", "jpg", "txt"],
 }
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -56,8 +59,30 @@ def kind_of(path) -> str | None:
     return None
 
 
+def _bundled_dirs() -> list[Path]:
+    """Folders that may hold ffmpeg.exe / pandoc.exe shipped with the app."""
+    dirs = []
+    if getattr(sys, "frozen", False):  # running as the packaged exe
+        dirs.append(Path(sys.executable).parent / "bin")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(Path(meipass) / "bin")
+    else:  # running from source: a ./bin folder (made by tools/fetch_tools.py) is optional
+        dirs.append(Path(__file__).resolve().parent / "bin")
+    return dirs
+
+
+def _which(name: str) -> str | None:
+    """Like shutil.which, but prefers copies bundled with the app."""
+    for d in _bundled_dirs():
+        for cand in (d / f"{name}.exe", d / name):
+            if cand.is_file():
+                return str(cand)
+    return shutil.which(name)
+
+
 def _soffice() -> str | None:
-    found = shutil.which("soffice") or shutil.which("libreoffice")
+    found = _which("soffice") or _which("libreoffice")
     if found:
         return found
     for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
@@ -80,9 +105,15 @@ def _have(tool: str) -> bool:
             return True
         except ImportError:
             return False
+    if tool == "pymupdf":
+        try:
+            import fitz  # noqa: F401
+            return True
+        except ImportError:
+            return False
     if tool == "soffice":
         return _soffice() is not None
-    return shutil.which(tool) is not None
+    return _which(tool) is not None
 
 
 def _tools_needed(kind: str, src: str, dst: str) -> list[str] | None:
@@ -91,6 +122,8 @@ def _tools_needed(kind: str, src: str, dst: str) -> list[str] | None:
         return ["pillow"]
     if kind in ("audio", "video"):
         return ["ffmpeg"]
+    if kind == "pdf":
+        return ["pymupdf"]
     if kind == "text":
         return ["pandoc", "soffice"] if dst == "pdf" else ["pandoc"]
     if kind == "office":
@@ -132,7 +165,10 @@ def _unique(path: Path) -> Path:
 
 
 def _run(cmd: list[str]) -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    if not os.path.isabs(cmd[0]):
+        cmd = [_which(cmd[0]) or cmd[0]] + cmd[1:]
+    # stdin=DEVNULL: windowed (no-console) apps have no valid stdin, which breaks child processes on Windows
+    proc = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
         raise RuntimeError(f"{Path(cmd[0]).name} failed: " + " | ".join(tail))
@@ -164,6 +200,24 @@ def _ffmpeg(src: Path, dst: Path, fmt: str, kind: str) -> None:
     elif kind == "video" and fmt in ("mp3", "wav", "flac", "ogg", "m4a", "aac"):
         cmd += ["-vn"]
     _run(cmd + [str(dst)])
+
+
+def _pdf(src: Path, dst: Path, fmt: str) -> Path:
+    """PDF -> txt, or png/jpg (one file for a 1-page PDF, a folder of pages otherwise)."""
+    import fitz  # PyMuPDF
+
+    with fitz.open(src) as doc:
+        if fmt == "txt":
+            dst.write_text("\n\n".join(page.get_text() for page in doc), encoding="utf-8")
+            return dst
+        if len(doc) == 1:
+            doc[0].get_pixmap(dpi=150).save(str(dst))
+            return dst
+        folder = _unique(src.with_name(f"{src.stem}_pages"))
+        folder.mkdir()
+        for n, page in enumerate(doc, 1):
+            page.get_pixmap(dpi=150).save(str(folder / f"page_{n:03d}.{fmt}"))
+        return folder
 
 
 def _pandoc(src: Path, dst: Path, fmt: str) -> None:
@@ -215,6 +269,8 @@ def convert(path, fmt: str) -> Path:
         raise ValueError(f"Cannot convert .{src_ext} to .{fmt} with the installed tools")
     dst = _unique(src.with_suffix(f".{fmt}"))
 
+    if kind == "pdf":
+        return _pdf(src, dst, fmt)
     if kind == "image":
         _image(src, dst, fmt)
     elif kind in ("audio", "video"):

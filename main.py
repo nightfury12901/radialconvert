@@ -21,8 +21,13 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSy
 import converter
 from radial_menu import RadialMenu
 
-# Log next to main.py: pythonw / windowed runs otherwise swallow every error.
-LOG = Path(__file__).with_name("radialconvert.log")
+import shell_integration
+
+# Log in %LOCALAPPDATA%\RadialConvert (always writable, even when installed under Program Files).
+# Windowed runs otherwise swallow every error.
+LOG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "RadialConvert"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG = LOG_DIR / "radialconvert.log"
 logging.basicConfig(filename=LOG, level=logging.INFO, format="%(asctime)s %(message)s")
 
 
@@ -56,6 +61,13 @@ def make_icon(size=64) -> QIcon:
     p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "⇄")
     p.end()
     return QIcon(pm)
+
+
+def app_icon() -> QIcon:
+    """The packaged icon if present, otherwise a drawn one."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    ico = base / "assets" / "icon.ico"
+    return QIcon(str(ico)) if ico.exists() else make_icon()
 
 
 class Worker(QThread):
@@ -143,14 +155,22 @@ class RadialConvert:
         self.workers: set[Worker] = set()
         self.last_output: str | None = None
 
-        self.tray = QSystemTrayIcon(make_icon())
+        self.tray = QSystemTrayIcon(app_icon())
         self.tray.setToolTip("RadialConvert")
         tray_menu = QMenu()
         act_pick = QAction("Convert file…", tray_menu, triggered=lambda: self.pick_file())
         act_circle = QAction("Show / hide drop circle", tray_menu, triggered=self.toggle_circle)
+        act_add = QAction("Add right-click menu entry", tray_menu, triggered=lambda: self.shell(True))
+        act_remove = QAction("Remove right-click menu entry", tray_menu, triggered=lambda: self.shell(False))
+        act_log = QAction("Open log file", tray_menu, triggered=lambda: self.open_log())
         act_quit = QAction("Quit", tray_menu, triggered=app.quit)
-        for a in (act_pick, act_circle, act_quit):
+        for a in (act_pick, act_circle):
             tray_menu.addAction(a)
+        tray_menu.addSeparator()
+        for a in (act_add, act_remove, act_log):
+            tray_menu.addAction(a)
+        tray_menu.addSeparator()
+        tray_menu.addAction(act_quit)
         self.tray.setContextMenu(tray_menu)
         self.tray._menu = tray_menu  # keep a reference alive
         self.tray.activated.connect(
@@ -169,6 +189,17 @@ class RadialConvert:
             self.circle.show()
 
     # ---------------------------------------------------------- actions
+    def shell(self, add: bool):
+        try:
+            msg = shell_integration.register() if add else shell_integration.unregister()
+        except OSError as exc:
+            msg = str(exc)
+        alert("RadialConvert", msg)
+
+    def open_log(self):
+        if sys.platform == "win32":
+            os.startfile(str(LOG))
+
     def toggle_circle(self):
         if self.circle:
             self.circle.setVisible(not self.circle.isVisible())
@@ -226,12 +257,21 @@ class RadialConvert:
 
 
 def main():
+    args = sys.argv[1:]
+    # Used by the installer / uninstaller (no window, exits immediately).
+    if "--register" in args or "--unregister" in args:
+        try:
+            shell_integration.register() if "--register" in args else shell_integration.unregister()
+        except OSError:
+            pass
+        return
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    cli_file = sys.argv[1] if len(sys.argv) > 1 else None
+    files = [a for a in args if not a.startswith("--")]
+    cli_file = files[0] if files else None
     _keep = RadialConvert(app, cli_file)  # noqa: F841
     sys.exit(app.exec())
 
-#hi
+
 if __name__ == "__main__":
     main()
