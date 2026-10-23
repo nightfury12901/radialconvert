@@ -121,7 +121,7 @@ class RadialMenu(QWidget):
         if idx != self.hover:
             self.hover = idx
             self.update()
-
+#hi
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             idx = self._index_at(e.position())
@@ -141,3 +141,4 @@ class RadialMenu(QWidget):
         if e.type() == QEvent.WindowDeactivate and self._armed:
             self._finish(None)
         return super().event(e)
+

@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], ["openpyxl", "xlrd", "odf"]
 
-for pkg in ("pymupdf", "fitz"):
+for pkg in ("pymupdf", "fitz", "pdf2docx", "docx", "pillow_heif"):
     try:
         d, b, h = collect_all(pkg)
         datas += d

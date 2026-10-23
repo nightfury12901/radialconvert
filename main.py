@@ -19,9 +19,10 @@ from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QPainter, QPix
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 import converter
-from radial_menu import RadialMenu
-
+import settings
 import shell_integration
+from radial_menu import RadialMenu
+from settings_dialog import SettingsDialog
 
 # Log in %LOCALAPPDATA%\RadialConvert (always writable, even when installed under Program Files).
 # Windowed runs otherwise swallow every error.
@@ -87,15 +88,16 @@ class Worker(QThread):
 class DropCircle(QWidget):
     """Small always-on-top orange circle. Drop a file on it, or double-click to browse."""
 
-    def __init__(self, on_file):
+    def __init__(self, on_file, menu=None):
         super().__init__()
         self.on_file = on_file
+        self.menu = menu  # right-click menu (same one as the tray icon)
         self._drag = None
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAcceptDrops(True)
         self.resize(84, 84)
-        self.setToolTip("Drop a file here (double-click to browse)")
+        self.setToolTip("Drop a file here (double-click to browse, right-click for settings)")
         self._hot = False
 
     def paintEvent(self, _):
@@ -143,6 +145,10 @@ class DropCircle(QWidget):
     def mouseReleaseEvent(self, _):
         self._drag = None
 
+    def contextMenuEvent(self, e):
+        if self.menu:
+            self.menu.exec(e.globalPos())
+
     def mouseDoubleClickEvent(self, _):
         self.on_file(None)
 
@@ -159,12 +165,13 @@ class RadialConvert:
         self.tray.setToolTip("RadialConvert")
         tray_menu = QMenu()
         act_pick = QAction("Convert file…", tray_menu, triggered=lambda: self.pick_file())
+        act_settings = QAction("Settings…", tray_menu, triggered=lambda: self.open_settings())
         act_circle = QAction("Show / hide drop circle", tray_menu, triggered=self.toggle_circle)
         act_add = QAction("Add right-click menu entry", tray_menu, triggered=lambda: self.shell(True))
         act_remove = QAction("Remove right-click menu entry", tray_menu, triggered=lambda: self.shell(False))
         act_log = QAction("Open log file", tray_menu, triggered=lambda: self.open_log())
         act_quit = QAction("Quit", tray_menu, triggered=app.quit)
-        for a in (act_pick, act_circle):
+        for a in (act_pick, act_settings, act_circle):
             tray_menu.addAction(a)
         tray_menu.addSeparator()
         for a in (act_add, act_remove, act_log):
@@ -183,7 +190,9 @@ class RadialConvert:
         if self.cli:
             QTimer.singleShot(0, lambda: self.open_menu(cli_file))
         else:
-            self.circle = DropCircle(lambda path: self.open_menu(path) if path else self.pick_file())
+            self.circle = DropCircle(
+                lambda path: self.open_menu(path) if path else self.pick_file(), menu=tray_menu
+            )
             geo = app.primaryScreen().availableGeometry()
             self.circle.move(geo.right() - 120, geo.bottom() - 160)
             self.circle.show()
@@ -195,6 +204,11 @@ class RadialConvert:
         except OSError as exc:
             msg = str(exc)
         alert("RadialConvert", msg)
+
+    def open_settings(self):
+        dlg = SettingsDialog()
+        dlg.setWindowIcon(app_icon())
+        dlg.exec()
 
     def open_log(self):
         if sys.platform == "win32":
@@ -243,7 +257,7 @@ class RadialConvert:
             logging.info("saved %s", msg)
             self.last_output = msg
             self.tray.showMessage("Done", f"Saved {Path(msg).name} (click to show in folder)", QSystemTrayIcon.Information, 5000)
-            if sys.platform == "win32":  # tray pop-ups are often hidden, so also open Explorer on the result
+            if sys.platform == "win32" and settings.load()["open_folder"]:  # tray pop-ups are often hidden, so also open Explorer on the result
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(msg)])
         else:
             logging.error("conversion failed: %s", msg)
